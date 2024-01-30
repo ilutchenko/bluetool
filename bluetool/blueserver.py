@@ -74,11 +74,125 @@ class SerialPort(object):
             pass
 
 
+class SerialMFiPort(object):
+    profile_path = "/org/bluez/myprofilemfi"
+
+    def __init__(self, channel=2):
+        dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+        self.bus = dbus.SystemBus()
+        self.uuid = "00000000-deca-fade-deca-deafdecacaff"
+        self.opts = {
+            "Name": "Reach MFi",
+            "Channel": dbus.UInt16(channel),
+            "AutoConnect": False
+        }
+
+        self.manager = dbus.Interface(
+            self.bus.get_object("org.bluez", "/org/bluez"),
+            "org.bluez.ProfileManager1")
+
+    def register(self):
+        try:
+            self.manager.RegisterProfile(
+                self.profile_path, self.uuid, self.opts)
+        except dbus.exceptions.DBusException as error:
+            logger.error(str(error) + "\n")
+            return False
+
+        return True
+
+    def unregister(self):
+        try:
+            self.manager.UnregisterProfile(self.profile_path)
+        except dbus.exceptions.DBusException:
+            pass
+
 class BluetoothServer(dbus.service.Object):
     hostname_bus_name = "org.freedesktop.hostname1"
     hostname_path = "/org/freedesktop/hostname1"
     def __init__(self, tcp_port_in=8043, tcp_port_out=None, channel=1):
         self._spp = SerialPort(channel)
+        self._bus = dbus.SystemBus()
+        dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+        dbus.service.Object.__init__(
+            self, dbus.SystemBus(), self._spp.profile_path)
+        self.tcp_port_in = tcp_port_in
+        self.tcp_port_out = tcp_port_out
+        self._mainloop = GObject.MainLoop()
+        self.set_current_hostname_as_alias()
+
+    def set_current_hostname_as_alias(self):
+        obj = self._bus.get_object(self.hostname_bus_name, self.hostname_path)
+        interface = dbus.Interface(obj, "org.freedesktop.DBus.Properties")
+        hostname = interface.Get(self.hostname_bus_name, "PrettyHostname").encode("utf-8")
+
+        Bluetooth().set_adapter_property("Alias", hostname)
+
+
+    def callback(self, *args, **kwargs):
+        hostname_dict = args[1]
+        if "PrettyHostname" in hostname_dict.keys():
+
+            hostname = str(hostname_dict["PrettyHostname"])
+            Bluetooth().set_adapter_property("Alias", hostname)
+
+    def register_callback(self):
+        self._bus.add_signal_receiver(self.callback,
+                                      bus_name=self.hostname_bus_name,
+                                      path_keyword=self.hostname_path,
+                                      interface_keyword='interface',
+                                      member_keyword='member',
+                                      message_keyword='msg')
+
+    def run(self):
+        if not self._spp.register():
+            return
+
+        self._mainloop.run()
+
+    def shutdown(self):
+        try:
+            self.bridge.stop()
+        except AttributeError:
+            pass
+
+        self._mainloop.quit()
+        self._spp.unregister()
+
+    @dbus.service.method(
+        "org.bluez.Profile1", in_signature="oha{sv}", out_signature="")
+    def NewConnection(self, path, fd, properties):
+        address = str(path)
+        address = address[len(address) - 17:len(address)]
+        address = address.replace("_", ":")
+        logger.info("Connected: {}\n".format(address))
+
+        blue_socket = socket.fromfd(
+            fd.take(), socket.AF_UNIX, socket.SOCK_STREAM)
+
+        socket_sink = SocketSink(sock=blue_socket)
+        self.bridge = TCPBridge(
+            sink=socket_sink,
+            port_in=self.tcp_port_in,
+            port_out=self.tcp_port_out)
+
+        try:
+            self.bridge.start(in_background=False)
+        except TCPBridgeError as error:
+            logger.error(str(error) + "\n")
+
+        self.bridge.stop()
+        blue_socket.close()
+
+        logger.info("Disconnected: {}\n".format(address))
+        Bluetooth().disconnect(address)
+
+
+class BluetoothMFiServer(dbus.service.Object):
+    hostname_bus_name = "org.freedesktop.hostname1"
+    hostname_path = "/org/freedesktop/hostname1"
+    def __init__(self, tcp_port_in=8043, tcp_port_out=None, channel=2):
+        self._spp = SerialMFiPort(channel)
         self._bus = dbus.SystemBus()
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         dbus.service.Object.__init__(

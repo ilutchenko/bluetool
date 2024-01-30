@@ -1,4 +1,4 @@
 from .bluetool import Bluetooth
-from .blueserver import BluetoothServer
+from .blueserver import BluetoothServer, BluetoothMFiServer
 
-__all__ = ['Bluetooth', 'BluetoothServer']
+__all__ = ['Bluetooth', 'BluetoothServer', 'BluetoothMFiServer']
